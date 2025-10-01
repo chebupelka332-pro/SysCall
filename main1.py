@@ -1,4 +1,4 @@
-# Финальная версия с разделением на потоки и стабилизирующей паузой
+# Финальная версия с разделением на потоки для стабильной одновременной работы
 import network
 import time
 import ubinascii
@@ -6,7 +6,7 @@ import machine
 import ubluetooth
 import json
 from umqtt.simple import MQTTClient
-import _thread
+import _thread  # <-- Модуль для работы с потоками
 
 # --- Настройки (без изменений) ---
 WIFI_SSID = "Pixel 9"
@@ -21,7 +21,9 @@ WHITELIST = [
 ]
 
 # --- Общие ресурсы для потоков ---
+# Очередь для передачи данных от BLE-потока к MQTT-потоку
 SHARED_QUEUE = []
+# Замок для безопасного доступа к очереди из разных потоков
 QUEUE_LOCK = _thread.allocate_lock()
 
 
@@ -42,7 +44,7 @@ def find_adv_name(adv_data):
 class BLEScanner:
     def __init__(self, ble, whitelist):
         self._ble = ble
-        self._ble.active(True)
+        self._ble.active(True)  # Активируем один раз
         self._whitelist = whitelist
         self._found_devices = {}
         self._ble.irq(self._irq)
@@ -52,14 +54,18 @@ class BLEScanner:
             addr_type, addr, adv_type, rssi, adv_data = data
             name = find_adv_name(adv_data)
             if name and name in self._whitelist:
+                # Обновляем RSSI для найденного устройства
                 self._found_devices[name] = rssi
 
     def get_results_and_clear(self):
+        """Возвращает собранные данные и очищает внутренний словарь."""
         results = self._found_devices.copy()
         self._found_devices.clear()
         return results
 
     def start_scan(self):
+        """Запускает непрерывное сканирование с оптимальными параметрами."""
+        # Интервал 80 мс, окно сканирования 40 мс (50% нагрузки)
         self._ble.gap_scan(0, 80000, 40000)
 
 
@@ -68,11 +74,16 @@ def ble_scanner_thread():
     print("[BLE Thread] Поток сканирования запущен.")
     ble = ubluetooth.BLE()
     scanner = BLEScanner(ble, WHITELIST)
-    scanner.start_scan()
+    scanner.start_scan()  # Запускаем непрерывное сканирование
+
     while True:
-        time.sleep(1)
+        time.sleep(1)  # Раз в секунду
+
+        # Получаем данные, накопленные за последнюю секунду
         beacons_data = scanner.get_results_and_clear()
+
         if beacons_data:
+            # Безопасно добавляем данные в общую очередь
             with QUEUE_LOCK:
                 SHARED_QUEUE.append(beacons_data)
 
@@ -92,12 +103,6 @@ if not wlan.isconnected():
 
 if wlan.isconnected():
     print(f"\n[Main Thread] Wi-Fi подключен! IP: {wlan.ifconfig()[0]}")
-
-    # --- ИСПРАВЛЕНИЕ: ДОБАВЛЕНА ПАУЗА ДЛЯ СТАБИЛИЗАЦИИ СЕТИ ---
-    print("[Main Thread] Пауза для стабилизации Wi-Fi соединения...")
-    time.sleep(2)
-    # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
-
     try:
         # 2. Подключаемся к MQTT
         client = MQTTClient(MQTT_CLIENT_ID, MQTT_BROKER, keepalive=60)
@@ -110,18 +115,22 @@ if wlan.isconnected():
 
         print("[Main Thread] Запуск основного цикла...")
         while True:
+            # 4. Проверяем очередь на наличие новых данных
             data_to_send = None
             with QUEUE_LOCK:
                 if SHARED_QUEUE:
+                    # Забираем самые свежие данные из очереди
                     data_to_send = SHARED_QUEUE.pop(0)
 
+            # 5. Если есть данные, отправляем их
             if data_to_send:
                 message = json.dumps(data_to_send)
                 client.publish(TOPIC_PUB, message.encode())
                 print(f"[Main Thread] Отправлено: {message}")
 
+            # 6. Обслуживаем MQTT соединение
             client.check_msg()
-            #time.sleep(0.1)
+            time.sleep_ms(100)  # Небольшая пауза, чтобы не загружать процессор
 
     except Exception as e:
         print(f"[Main Thread] Произошла ошибка в работе: {e}")
