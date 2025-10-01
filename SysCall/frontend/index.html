@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Навигация по зданию</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Карта помещения</h1>
+        <p>Ваше местоположение: <span id="coords">X: 0.0, Y: 0.0</span></p>
+        <div class="canvas-wrapper">
+            <canvas id="mapCanvas" width="800" height="600"></canvas>
+        </div>
+        <p class="hint">Кликните на карту, чтобы построить маршрут.</p>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
