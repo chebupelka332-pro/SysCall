@@ -40,15 +40,15 @@ st.sidebar.markdown("### Шаг 1: Калибровка")
 st.sidebar.info(
     "Измерьте RSSI на 1 метре, чтобы найти `A (Tx Power)`. Затем измерьте на 2, 3, 4 метрах, чтобы подобрать `n`.")
 # Параметр A: мощность сигнала на расстоянии 1 метр.
-tx_power = st.sidebar.slider("A (Tx Power)", -100.0, -20.0, -50.0, 0.5)
+tx_power = st.sidebar.slider("A (Tx Power)", -100.0, -20.0, -46.5, 0.5)
 # Параметр n: коэффициент затухания сигнала в среде.
-n_path_loss = st.sidebar.slider("n (Path Loss Exponent)", 1.0, 5.0, 2.1, 0.1)
+n_path_loss = st.sidebar.slider("n (Path Loss Exponent)", 1.0, 5.0, 2.0, 0.1)
 
 st.sidebar.markdown("### Шаг 2: Настройка фильтров")
 # Размер окна для медианного фильтра
-median_window = st.sidebar.slider("Окно медианного фильтра", 3, 70, 7, 1)
+median_window = st.sidebar.slider("Окно медианного фильтра", 3, 70, 25, 1)
 # Шум измерения (R) для Калмана: насколько мы "не доверяем" новым данным. Больше R -> более плавный, но инертный путь.
-kalman_R = st.sidebar.slider("Шум измерения (R)", 0.01, 1.0, 0.1, 0.01)
+kalman_R = st.sidebar.slider("Шум измерения (R)", 0.01, 1.0, 0.7, 0.01)
 # Шум процесса (Q) для Калмана: как сильно может измениться "истинное" значение между измерениями. Больше Q -> быстрее реакция на изменения.
 kalman_Q = st.sidebar.slider("Шум процесса (Q)", 0.0001, 0.1, 0.005, 0.0001)
 
@@ -102,7 +102,7 @@ def update_kalman_filter(state, measurement, R, Q):
 
 # --- 5. ЛОГИКА MQTT В ФОНОВОМ ПОТОКЕ (с фильтрацией) ---
 
-# >>> ИЗМЕНЕНИЕ: Добавлена защитная проверка в начало функции on_message <<<
+
 def on_message(client, userdata, msg):
     """Вызывается при получении данных от MQTT. Обрабатывает и фильтрует RSSI."""
     try:
@@ -255,7 +255,7 @@ with main_col:
         with btn_col3:
             st.download_button("📥 Скачать маршрут (*.path)",
                                format_path_data_for_download(st.session_state.path),
-                               "filtered_route.path", use_container_width=True)
+                               "route.path", use_container_width=True)
 
     # Обновление данных из очереди MQTT
     while not st.session_state.data_queue.empty():
@@ -280,9 +280,9 @@ with main_col:
             ax.text(pos[0], pos[1] + 0.3, name, fontsize=12, color='darkblue', ha='center')
             if name in st.session_state.live_data:
                 filtered_rssi = st.session_state.live_data[name]['filtered_rssi']
-                ax.text(pos[0], pos[1] - 0.4, f"RSSI: {filtered_rssi}", fontsize=9, color='gray', ha='center')
+                ax.text(pos[0], pos[1] - 1.2, f"RSSI: {filtered_rssi}", fontsize=9, color='gray', ha='center')
 
-    # Рисуем путь
+
     if len(path_copy) > 0:
         px = [p['x'] for p in path_copy]
         py = [p['y'] for p in path_copy]
@@ -304,6 +304,6 @@ with data_col:
     st.subheader("Последние точки пути")
     st.dataframe(path_copy[-10:], use_container_width=True)
 
-# Перезапуск для плавного обновления интерфейса
-time.sleep(0.5)  # Уменьшаем частоту обновления для снижения нагрузки
+
+time.sleep(0.5)
 st.rerun()
