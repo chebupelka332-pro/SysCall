@@ -7,116 +7,190 @@ import queue
 from scipy.optimize import minimize
 import numpy as np
 import matplotlib.pyplot as plt
+from collections import deque
 
-
-LAST_POSITION = np.array([0.0, 0.0])
-# --- Настройки ---
+# --- 1. НАСТРОЙКИ СИСТЕМЫ ---
 BEACONS_FILE = "standart.beacons"
-TX_POWER = -54
-N = 2.00
 MQTT_BROKER = "localhost"
 MQTT_TOPIC = "registrar/data"
 
-# --- Инициализация состояния Streamlit ---
+# --- 2. ИНИЦИАЛИЗАЦИЯ СОСТОЯНИЯ ПРИЛОЖЕНИЯ ---
+# Очередь для безопасной передачи данных между потоками MQTT и Streamlit
+if 'data_queue' not in st.session_state:
+    st.session_state.data_queue = queue.Queue()
+
+# Состояния, которые сохраняются между обновлениями страницы
 if 'path' not in st.session_state: st.session_state.path = []
 if 'beacons' not in st.session_state: st.session_state.beacons = {}
+if 'live_data' not in st.session_state: st.session_state.live_data = {}  # {beacon_name: {'raw_rssi': X, 'filtered_rssi': Y}}
 if 'recording' not in st.session_state: st.session_state.recording = False
-if 'data_queue' not in st.session_state: st.session_state.data_queue = queue.Queue()
+if 'app_initialized' not in st.session_state: st.session_state.app_initialized = False
 
 
+# Хранит последние N значений RSSI для медианного фильтра
+if 'rssi_history' not in st.session_state:
+    st.session_state.rssi_history = {}
+# Хранит состояние (оценку и ковариацию ошибки) для фильтра Калмана по каждому маячку
+if 'kalman_states' not in st.session_state:
+    st.session_state.kalman_states = {}
 
-# --- Функции для вычислений (без изменений) ---
+# --- 3. ПАНЕЛЬ УПРАВЛЕНИЯ И КАЛИБРОВКИ (ШАГ 1) ---
+st.sidebar.title("Параметры системы")
+st.sidebar.markdown("### Шаг 1: Калибровка")
+st.sidebar.info(
+    "Измерьте RSSI на 1 метре, чтобы найти `A (Tx Power)`. Затем измерьте на 2, 3, 4 метрах, чтобы подобрать `n`.")
+# Параметр A: мощность сигнала на расстоянии 1 метр.
+tx_power = st.sidebar.slider("A (Tx Power)", -100.0, -20.0, -50.0, 0.5)
+# Параметр n: коэффициент затухания сигнала в среде.
+n_path_loss = st.sidebar.slider("n (Path Loss Exponent)", 1.0, 5.0, 2.1, 0.1)
+
+st.sidebar.markdown("### Шаг 2: Настройка фильтров")
+# Размер окна для медианного фильтра
+median_window = st.sidebar.slider("Окно медианного фильтра", 3, 70, 7, 1)
+# Шум измерения (R) для Калмана: насколько мы "не доверяем" новым данным. Больше R -> более плавный, но инертный путь.
+kalman_R = st.sidebar.slider("Шум измерения (R)", 0.01, 1.0, 0.1, 0.01)
+# Шум процесса (Q) для Калмана: как сильно может измениться "истинное" значение между измерениями. Больше Q -> быстрее реакция на изменения.
+kalman_Q = st.sidebar.slider("Шум процесса (Q)", 0.0001, 0.1, 0.005, 0.0001)
+
+
+# --- 4. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+
 def load_beacon_positions(filename):
-    positions = {};
+    """Читает файл с координатами маячков."""
+    positions = {}
     try:
         with open(filename, 'r') as f:
             next(f)
             for line in f:
                 parts = line.strip().split(';')
-                if len(parts) == 3: name, x, y = parts; positions[name] = (float(x), float(y))
-        print(f"Загружены из '{filename}': {positions}");
+                if len(parts) == 3:
+                    name, x, y = parts
+                    positions[name] = (float(x), float(y))
+        print(f"Загружены маячки из '{filename}': {positions}")
         return positions
-    except FileNotFoundError:
-        st.error(f"Файл '{filename}' не найден!"); return None
+    except Exception as e:
+        st.error(f"Ошибка загрузки файла '{filename}': {e}")
+        return None
 
 
-def rssi_to_distance(rssi, tx_power, n): return 10 ** ((tx_power - rssi) / (10 * n))
+def rssi_to_distance(rssi, tx_power_val, n_val):
+    """Преобразует RSSI в расстояние с использованием калибровочных параметров."""
+    return 10 ** ((tx_power_val - rssi) / (10 * n_val))
 
 
-def error_function(point, beacons):
-    error = 0.0;
-    px, py = point
-    for name, (bx, by, distance) in beacons.items(): error += (np.sqrt((px - bx) ** 2 + (py - by) ** 2) - distance) ** 2
+def error_function(point_guess, beacons_with_distances):
+    """Функция ошибки для минимизации (Метод Наименьших Квадратов)."""
+    error = 0.0
+    px, py = point_guess
+    for name, (bx, by, distance) in beacons_with_distances.items():
+        calculated_dist = np.sqrt((px - bx) ** 2 + (py - by) ** 2)
+        error += (calculated_dist - distance) ** 2
     return error
 
 
-# Добавьте это в начало файла, после других настроек
-RSSI_HISTORY = {}
-HISTORY_SIZE = 5  # Будем хранить 5 последних значений
+def update_kalman_filter(state, measurement, R, Q):
+    """Обновляет состояние 1D фильтра Калмана."""
+    # Предсказание
+    x_pred = state['x']
+    P_pred = state['P'] + Q
+    # Обновление
+    K = P_pred / (P_pred + R)  # Коэффициент Калмана
+    x_new = x_pred + K * (measurement - x_pred)
+    P_new = (1 - K) * P_pred
+    return {'x': x_new, 'P': P_new}, x_new
 
 
-# ...
+# --- 5. ЛОГИКА MQTT В ФОНОВОМ ПОТОКЕ (с фильтрацией) ---
 
-# Замените вашу функцию on_message на эту обновленную версию
+# >>> ИЗМЕНЕНИЕ: Добавлена защитная проверка в начало функции on_message <<<
 def on_message(client, userdata, msg):
-    global LAST_POSITION
-    global RSSI_HISTORY  # Объявляем, что будем изменять глобальную переменную
-    beacons_positions = userdata['beacons']
-    data_queue = userdata['queue']
-
-    if not beacons_positions: return
-
+    """Вызывается при получении данных от MQTT. Обрабатывает и фильтрует RSSI."""
     try:
-        data = json.loads(msg.payload.decode())
+        # --- ЗАЩИТА ОТ "СОСТОЯНИЯ ГОНКИ" ---
+        # Гарантируем, что словари для фильтров существуют в session_state,
+        # даже если этот поток запустился раньше, чем основной поток их создал.
+        if 'rssi_history' not in st.session_state:
+            st.session_state.rssi_history = {}
+        if 'kalman_states' not in st.session_state:
+            st.session_state.kalman_states = {}
+        # --- КОНЕЦ ЗАЩИТЫ ---
 
-        # --- БЛОК ФИЛЬТРАЦИИ ---
-        processed_rssi = {}
-        for name, rssi in data.items():
-            if name not in RSSI_HISTORY:
-                RSSI_HISTORY[name] = []
+        # Извлекаем общие ресурсы из userdata
+        beacons_positions = userdata['beacons']
+        data_queue = userdata['queue']
+        params = userdata['params']
 
-            RSSI_HISTORY[name].append(rssi)
+        raw_rssi_data = json.loads(msg.payload.decode())
 
-            # Ограничиваем размер истории
-            if len(RSSI_HISTORY[name]) > HISTORY_SIZE:
-                RSSI_HISTORY[name].pop(0)
+        # --- ЭТАП ФИЛЬТРАЦИИ (ШАГ 2) ---
+        filtered_rssi_map = {}
+        live_data_update = {}
 
-            # Считаем среднее и используем его
-            average_rssi = sum(RSSI_HISTORY[name]) / len(RSSI_HISTORY[name])
-            processed_rssi[name] = average_rssi
-        # --- КОНЕЦ БЛОКА ФИЛЬТРАЦИИ ---
+        for name, rssi in raw_rssi_data.items():
+            if name not in beacons_positions:
+                continue
+
+            # 1. Инициализация хранилищ при первом появлении маячка
+            if name not in st.session_state.rssi_history:
+                st.session_state.rssi_history[name] = deque(maxlen=params['median_window'])
+                st.session_state.kalman_states[name] = {'x': float(rssi), 'P': 1.0}
+
+            # 2. Обновляем окно для медианного фильтра
+            st.session_state.rssi_history[name].append(rssi)
+
+            # 3. Применяем медианный фильтр
+            median_filtered_rssi = np.median(list(st.session_state.rssi_history[name]))
+
+            # 4. Применяем фильтр Калмана
+            kalman_state = st.session_state.kalman_states[name]
+            new_state, kalman_filtered_rssi = update_kalman_filter(
+                kalman_state, median_filtered_rssi, params['kalman_R'], params['kalman_Q']
+            )
+            st.session_state.kalman_states[name] = new_state
+
+            filtered_rssi_map[name] = kalman_filtered_rssi
+            live_data_update[name] = {'raw_rssi': rssi, 'filtered_rssi': round(kalman_filtered_rssi, 2)}
+
+        # --- ЭТАП МУЛЬТИЛАТЕРАЦИИ (ШАГ 3) ---
+        N_BEST_BEACONS = 3
+
+        # 2. Сортируем все доступные маячки по силе их отфильтрованного сигнала (от сильного к слабому)
+        # filtered_rssi_map имеет вид {'beacon_name': rssi_value}
+        sorted_beacons = sorted(filtered_rssi_map.items(), key=lambda item: item[1], reverse=True)
+
+        # 3. Берем только N лучших из отсортированного списка
+        top_n_beacons = dict(sorted_beacons[:N_BEST_BEACONS])
 
         beacons_for_calc = {}
-        # Используем отфильтрованные данные processed_rssi вместо сырых data
-        for name, avg_rssi in processed_rssi.items():
+        for name, filtered_rssi in top_n_beacons.items():
             if name in beacons_positions:
-                dist = rssi_to_distance(avg_rssi, TX_POWER, N)  # Используем средний RSSI
+                distance = rssi_to_distance(filtered_rssi, params['tx_power'], params['n_path_loss'])
                 bx, by = beacons_positions[name]
-                beacons_for_calc[name] = (bx, by, dist)
+                beacons_for_calc[name] = (bx, by, distance)
 
-        if len(beacons_for_calc) < 3: return
-        result = minimize(error_function, LAST_POSITION, args=(beacons_for_calc,), method='L-BFGS-B')
+        # Используем 4+ маячка для повышения точности
+        if len(beacons_for_calc) < 3:
+            # Обновляем RSSI в интерфейсе, даже если точку не считаем
+            data_queue.put({'point': None, 'live_data': live_data_update})
+            return
+
+        # Запускаем оптимизатор для поиска лучшей точки (Метод Наименьших Квадратов)
+        result = minimize(error_function, np.array([0.0, 0.0]), args=(beacons_for_calc,), method='L-BFGS-B')
 
         if result.success:
-            new_point_coords = result.x
-            # Сохраняем новую позицию для следующего раза
-            LAST_POSITION = new_point_coords
-
-            new_point = {'x': new_point_coords[0], 'y': new_point_coords[1]}
-            data_queue.put(new_point)
+            new_point = {'x': result.x[0], 'y': result.x[1]}
+            data_to_queue = {'point': new_point, 'live_data': live_data_update}
+            data_queue.put(data_to_queue)
 
     except Exception as e:
         print(f"Ошибка в MQTT-потоке: {e}")
 
 
-# ИЗМЕНЕНИЕ 2: Функция потока теперь принимает и очередь
-def mqtt_thread_func(beacon_positions, data_queue):
+def mqtt_thread_func(beacon_positions, data_queue, params):
+    """Функция, которая запускает MQTT-клиент в отдельном потоке."""
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    # Передаем в userdata и позиции, и саму очередь
-    userdata = {'beacons': beacon_positions, 'queue': data_queue}
-    client.user_data_set(userdata)
+    client.user_data_set({'beacons': beacon_positions, 'queue': data_queue, 'params': params})
     client.on_message = on_message
-
     try:
         client.connect(MQTT_BROKER, 1883, 60)
         client.subscribe(MQTT_TOPIC)
@@ -126,72 +200,110 @@ def mqtt_thread_func(beacon_positions, data_queue):
         print(f"Не удалось запустить MQTT-поток: {e}")
 
 
-def format_path_data(path_data):
-    header = "X;Y\n";
-    lines = [f"{p['x']};{p['y']}" for p in path_data];
+def format_path_data_for_download(path_data):
+    """Готовит строку для сохранения в .path файл."""
+    header = "X;Y\n"
+    lines = [f"{point['x']};{point['y']}" for point in path_data]
     return header + "\n".join(lines)
 
 
-# --- Основная часть - интерфейс Streamlit ---
+# --- 6. ИНТЕРФЕЙС STREAMLIT ---
+
 st.set_page_config(layout="wide")
-st.title("Визуализация и управление маршрутом")
+st.title("Улучшенная система навигации с фильтрацией")
 
-if 'beacons_loaded' not in st.session_state:
+# Однократная загрузка данных и запуск потока
+if not st.session_state.app_initialized:
     st.session_state.beacons = load_beacon_positions(BEACONS_FILE)
-    st.session_state.beacons_loaded = True
+    if st.session_state.beacons:
+        # Собираем все настраиваемые параметры для передачи в поток
+        runtime_params = {
+            'tx_power': tx_power, 'n_path_loss': n_path_loss,
+            'median_window': median_window,
+            'kalman_R': kalman_R, 'kalman_Q': kalman_Q
+        }
+        mqtt_thread = threading.Thread(
+            target=mqtt_thread_func,
+            args=(st.session_state.beacons, st.session_state.data_queue, runtime_params)
+        )
+        mqtt_thread.daemon = True
+        mqtt_thread.start()
+        st.session_state.app_initialized = True
+    else:
+        st.error("Не удалось загрузить маячки. MQTT-поток не запущен.")
 
-# ИЗМЕНЕНИЕ 3: Передаем объект очереди в поток при его создании
-if 'mqtt_thread_started' not in st.session_state and st.session_state.beacons:
-    mqtt_thread = threading.Thread(
-        target=mqtt_thread_func,
-        args=(st.session_state.beacons, st.session_state.data_queue)  # Передаем и маячки, и очередь
-    )
-    mqtt_thread.daemon = True
-    mqtt_thread.start()
-    st.session_state.mqtt_thread_started = True
+# --- Управление и отображение ---
+main_col, data_col = st.columns([3, 1])
 
-# ... (код кнопок без изменений) ...
-col1, col2, col3 = st.columns(3);
-with col1:
-    if st.button("Начать новый маршрут"): st.session_state.path = []; st.session_state.recording = True; st.success(
-        "Запись начата!")
-with col2:
-    if st.button("Завершить маршрут"): st.session_state.recording = False; st.info("Запись завершена.")
-if st.session_state.recording:
-    st.warning(" идет запись маршрута...")
-else:
-    if st.session_state.path:
-        with col3: st.download_button("Скачать маршрут (*.path)", format_path_data(st.session_state.path), "route.path",
-                                      "text/plain")
+with main_col:
+    # Кнопки управления
+    btn_col1, btn_col2, btn_col3 = st.columns(3)
+    with btn_col1:
+        if st.button("▶️ Начать новый маршрут", use_container_width=True):
+            st.session_state.path = []
+            st.session_state.live_data = {}
+            # Сбрасываем фильтры при старте новой записи
+            st.session_state.rssi_history.clear()
+            st.session_state.kalman_states.clear()
+            st.session_state.recording = True
+            st.success("Запись начата!")
+    with btn_col2:
+        if st.button("⏹️ Завершить маршрут", use_container_width=True):
+            st.session_state.recording = False
+            st.info("Запись завершена.")
+    if not st.session_state.recording and st.session_state.path:
+        with btn_col3:
+            st.download_button("📥 Скачать маршрут (*.path)",
+                               format_path_data_for_download(st.session_state.path),
+                               "filtered_route.path", use_container_width=True)
 
-# Основной поток работает с очередью из st.session_state
-while not st.session_state.data_queue.empty():
-    new_point = st.session_state.data_queue.get()
-    if st.session_state.recording:
-        st.session_state.path.append(new_point)
+    # Обновление данных из очереди MQTT
+    while not st.session_state.data_queue.empty():
+        data_from_queue = st.session_state.data_queue.get()
+        # Обновляем живые данные RSSI всегда
+        if data_from_queue.get('live_data'):
+            st.session_state.live_data.update(data_from_queue['live_data'])
+        # Добавляем точку в путь, только если она была рассчитана и идет запись
+        if data_from_queue.get('point') and st.session_state.recording:
+            st.session_state.path.append(data_from_queue['point'])
 
-# ... (код отрисовки без изменений) ...
-fig, ax = plt.subplots(figsize=(10, 8))
-path_copy = list(st.session_state.path)
-if st.session_state.beacons:
-    b_x = [p[0] for p in st.session_state.beacons.values()];
-    b_y = [p[1] for p in st.session_state.beacons.values()]
-    ax.scatter(b_x, b_y, s=100, c='blue', label='Маячки')
-    for name, pos in st.session_state.beacons.items(): ax.text(pos[0] + 0.1, pos[1] + 0.1, name)
-if len(path_copy) > 0:
-    p_x = [p['x'] for p in path_copy];
-    p_y = [p['y'] for p in path_copy]
-    ax.plot(p_x, p_y, color='red', marker='o', linestyle='-', label='Путь')
-    ax.scatter(p_x[-1], p_y[-1], s=150, c='red', edgecolors='black', zorder=5, label='Текущая позиция')
-ax.set_xlabel("X (м)");
-ax.set_ylabel("Y (м)");
-ax.set_title("Карта");
-ax.grid(True);
-ax.legend();
-ax.axis('equal')
-st.pyplot(fig);
-plt.close(fig)
-st.subheader("Данные пути (последние 10 точек)");
-st.dataframe(path_copy[-10:])
-time.sleep(1);
+    # Отрисовка карты
+    fig, ax = plt.subplots(figsize=(10, 8))
+    path_copy = list(st.session_state.path)
+
+    # Рисуем маячки и их RSSI
+    if st.session_state.beacons:
+        bx = [p[0] for p in st.session_state.beacons.values()]
+        by = [p[1] for p in st.session_state.beacons.values()]
+        ax.scatter(bx, by, s=120, c='blue', label='Маячки', zorder=10)
+        for name, pos in st.session_state.beacons.items():
+            ax.text(pos[0], pos[1] + 0.3, name, fontsize=12, color='darkblue', ha='center')
+            if name in st.session_state.live_data:
+                filtered_rssi = st.session_state.live_data[name]['filtered_rssi']
+                ax.text(pos[0], pos[1] - 0.4, f"RSSI: {filtered_rssi}", fontsize=9, color='gray', ha='center')
+
+    # Рисуем путь
+    if len(path_copy) > 0:
+        px = [p['x'] for p in path_copy]
+        py = [p['y'] for p in path_copy]
+        ax.plot(px, py, color='green', marker='o', linestyle='-', markersize=4, label="Пройденный путь")
+        ax.scatter(px[-1], py[-1], s=180, c='red', edgecolors='black', zorder=5, label='Текущая позиция')
+
+    ax.set_title("Карта");
+    ax.set_xlabel("X (м)");
+    ax.set_ylabel("Y (м)")
+    ax.grid(True);
+    ax.legend();
+    ax.axis('equal')
+    st.pyplot(fig, clear_figure=True)
+
+with data_col:
+    st.subheader("Текущие данные")
+    st.dataframe(st.session_state.live_data, use_container_width=True)
+
+    st.subheader("Последние точки пути")
+    st.dataframe(path_copy[-10:], use_container_width=True)
+
+# Перезапуск для плавного обновления интерфейса
+time.sleep(0.5)  # Уменьшаем частоту обновления для снижения нагрузки
 st.rerun()

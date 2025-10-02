@@ -68,9 +68,10 @@ def ble_scanner_thread():
     print("[BLE Thread] Поток сканирования запущен.")
     ble = ubluetooth.BLE()
     scanner = BLEScanner(ble, WHITELIST)
+
     scanner.start_scan()
     while True:
-        time.sleep(1)
+        time.sleep(1.1)
         beacons_data = scanner.get_results_and_clear()
         if beacons_data:
             with QUEUE_LOCK:
