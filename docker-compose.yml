@@ -1,0 +1,25 @@
+# Указываем версию синтаксиса docker-compose
+version: '3.8'
+
+# Определяем все сервисы (контейнеры) нашего приложения
+services:
+
+  # 1. Наш Python бэкенд
+  backend:
+    build: .  # Собирать этот сервис из Dockerfile в текущей директории
+    container_name: syscall_backend
+    ports:
+      - "5000:5000"  # Пробрасываем порт 5000 для доступа к Flask
+    volumes:
+      # Эта строка полезна для разработки: она "зеркалит" код с вашего ПК
+      # в контейнер, чтобы изменения применялись без пересборки.
+      # Если не нужно - можно закомментировать.
+      - ./SysCall:/app/SysCall
+
+  # 2. MQTT брокер Mosquitto
+  broker:
+    build: ./mosquitto  # Собирать этот сервис из Dockerfile в папке ./mosquitto
+    container_name: syscall_broker
+    ports:
+      - "1883:1883"      # Пробрасываем стандартный порт MQTT
+      - "9001:9001"      # Порт для WebSocket (если понадобится)

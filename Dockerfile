@@ -1,10 +1,10 @@
-# Use an official Python runtime as a parent image
+# 1. Указываем базовый образ. ЭТО САМАЯ ВАЖНАЯ СТРОКА.
 FROM python:3.12-slim
 
-# Set the working directory in the container
+# 2. Устанавливаем рабочую директорию внутри контейнера
 WORKDIR /app
 
-# Install necessary dependencies for building packages
+# 3. Устанавливаем системные зависимости
 RUN apt-get update && apt-get install -y \
     build-essential \
     libssl-dev \
@@ -14,27 +14,22 @@ RUN apt-get update && apt-get install -y \
     make \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the backend directory to /app/backend in the container
+# 4. Копируем папки backend и frontend в контейнер
 COPY SysCall/backend /app/backend
-
-# Copy the frontend directory to /app/frontend in the container
 COPY SysCall/frontend /app/frontend
 
-# Копируем файл beacons.beacons в контейнер
-COPY SysCall/backend/beacons.beacons /app/backend/beacons.beacons
-
-# Copy the requirements.txt file from the root directory
+# 5. Копируем корневой файл requirements.txt
 COPY requirements.txt /app/
 
-# Install any needed packages specified in requirements.txt
+# 6. Устанавливаем зависимости Python
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Expose port 5000 for Flask
+# 7. Открываем порт
 EXPOSE 5000
 
-# Define environment variable for Flask
+# 8. Устанавливаем переменные окружения для Flask
 ENV FLASK_APP=/app/backend/app.py
 ENV FLASK_RUN_HOST=0.0.0.0
 
-# Run the Flask app
+# 9. Запускаем приложение
 CMD ["flask", "run"]
