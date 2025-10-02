@@ -20,6 +20,9 @@ COPY SysCall/backend /app/backend
 # Copy the frontend directory to /app/frontend in the container
 COPY SysCall/frontend /app/frontend
 
+# Копируем файл beacons.beacons в контейнер
+COPY SysCall/backend/beacons.beacons /app/backend/beacons.beacons
+
 # Copy the requirements.txt file from the root directory
 COPY requirements.txt /app/
 
