@@ -14,6 +14,7 @@ WIFI_PASSWORD = "29052006"
 MQTT_BROKER = "10.99.15.57"
 MQTT_CLIENT_ID = ubinascii.hexlify(machine.unique_id())
 TOPIC_PUB = b"registrar/data"
+FREQ = 1.0 # Частота отправки данных в секундах
 
 WHITELIST = [
     "beacon_1", "beacon_2", "beacon_3", "beacon_4",
@@ -71,7 +72,7 @@ def ble_scanner_thread():
 
     scanner.start_scan()
     while True:
-        time.sleep(1.1)
+        time.sleep(FREQ)
         beacons_data = scanner.get_results_and_clear()
         if beacons_data:
             with QUEUE_LOCK:
