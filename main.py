@@ -72,7 +72,7 @@ def ble_scanner_thread():
 
     scanner.start_scan()
     while True:
-        time.sleep(FREQ)
+        time.sleep(1 / FREQ)
         beacons_data = scanner.get_results_and_clear()
         if beacons_data:
             with QUEUE_LOCK:
