@@ -1,35 +1,20 @@
-# 1. Указываем базовый образ. ЭТО САМАЯ ВАЖНАЯ СТРОКА.
-FROM python:3.12-slim
+# Dockerfile
 
-# 2. Устанавливаем рабочую директорию внутри контейнера
+# 1. Используем официальный базовый образ Python.
+# Используйте ту же версию, что и в вашем проекте. 'slim' — это легковесная версия.
+FROM python:3.9-slim
+
+# 2. Устанавливаем рабочую директорию внутри контейнера.
 WORKDIR /app
 
-# 3. Устанавливаем системные зависимости
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    libssl-dev \
-    libffi-dev \
-    python3-dev \
-    gcc \
-    make \
-    && rm -rf /var/lib/apt/lists/*
+# 3. Копируем файл с зависимостями и устанавливаем их.
+# Это делается отдельным шагом для использования кэширования Docker.
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# 4. Копируем папки backend и frontend в контейнер
-COPY SysCall/backend /app/backend
-COPY SysCall/frontend /app/frontend
+# 4. Копируем все остальные файлы проекта в рабочую директорию.
+COPY . .
 
-# 5. Копируем корневой файл requirements.txt
-COPY requirements.txt /app/
-
-# 6. Устанавливаем зависимости Python
-RUN pip install --no-cache-dir -r /app/requirements.txt
-
-# 7. Открываем порт
-EXPOSE 5000
-
-# 8. Устанавливаем переменные окружения для Flask
-ENV FLASK_APP=/app/backend/app.py
-ENV FLASK_RUN_HOST=0.0.0.0
-
-# 9. Запускаем приложение
-CMD ["flask", "run"]
+# 5. Указываем команду для запуска вашего приложения.
+# Если ваш главный файл называется main.py, измените 'app.py' на 'main.py'.
+CMD ["python", "app.py"]

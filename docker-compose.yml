@@ -1,25 +1,42 @@
-# Указываем версию синтаксиса docker-compose
+# docker-compose.yml
+
 version: '3.8'
 
-# Определяем все сервисы (контейнеры) нашего приложения
 services:
+  # Сервис для вашего Python-приложения
+  app:
+    # Собирать образ из Dockerfile в текущей директории (.)
+    build: .
+    container_name: python_app
+    # Перезапускать контейнер, если он упадет
+    restart: unless-stopped
+    # Зависит от сервиса mosquitto. Docker Compose запустит mosquitto перед app.
+    depends_on:
+      - mosquitto
+    # Подключаем сервис к общей сети
+    networks:
+      - app-network
 
-  # 1. Наш Python бэкенд
-  backend:
-    build: .  # Собирать этот сервис из Dockerfile в текущей директории
-    container_name: syscall_backend
+  # Сервис для MQTT-брокера Mosquitto
+  mosquitto:
+    # Используем готовый официальный образ
+    image: eclipse-mosquitto:latest
+    container_name: mosquitto_broker
+    restart: unless-stopped
+    # Пробрасываем порты наружу, чтобы можно было подключиться к брокеру с хост-машины
     ports:
-      - "5000:5000"  # Пробрасываем порт 5000 для доступа к Flask
+      - "1883:1883" # Стандартный порт MQTT
+      - "9001:9001" # Порт для WebSockets
+    # Монтируем ваши файлы конфигурации и папки для данных/логов внутрь контейнера
     volumes:
-      # Эта строка полезна для разработки: она "зеркалит" код с вашего ПК
-      # в контейнер, чтобы изменения применялись без пересборки.
-      # Если не нужно - можно закомментировать.
-      - ./SysCall:/app/SysCall
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    # Подключаем сервис к общей сети
+    networks:
+      - app-network
 
-  # 2. MQTT брокер Mosquitto
-  broker:
-    build: ./mosquitto  # Собирать этот сервис из Dockerfile в папке ./mosquitto
-    container_name: syscall_broker
-    ports:
-      - "1883:1883"      # Пробрасываем стандартный порт MQTT
-      - "9001:9001"      # Порт для WebSocket (если понадобится)
+# Определяем общую сеть для взаимодействия контейнеров
+networks:
+  app-network:
+    driver: bridge
